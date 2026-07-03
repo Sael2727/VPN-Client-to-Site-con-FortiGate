@@ -1,0 +1,391 @@
+============================================================
+SCRIPT - FortiGate VPN Client-to-Site IPSec Dial-up
+Estudiante: Sael German
+Matricula: 2025-0725
+============================================================
+
+OBJETIVO:
+Configurar una VPN Client-to-Site usando un cliente Linux conectado
+a un FortiGate mediante IPSec Dial-up. La LAN interna del FortiGate
+sera alcanzada desde el cliente VPN Linux.
+
+============================================================
+1. PLAN DE DIRECCIONAMIENTO
+============================================================
+
+Cliente Linux ens4/e1: 10.7.25.5/30
+ISP e0/0:              10.7.25.6/30
+
+ISP e0/1:              10.7.25.2/30
+FGT1 port3 WAN:        10.7.25.1/30
+
+FGT1 port2 LAN:        10.7.25.65/27
+VPC-LAN:               10.7.25.66/27
+Gateway VPC-LAN:       10.7.25.65
+
+Pool VPN cliente:      10.7.25.193 - 10.7.25.206
+Usuario VPN:           vpnuser
+Password VPN:          vpnpass
+Pre-Shared Key:        VPN12345
+
+Nombre del tunel:      IPSEC_CL
+Nombre Phase 2:        IPSEC_CL_P2
+
+============================================================
+2. CONFIGURACION DEL ROUTER ISP
+============================================================
+
+enable
+configure terminal
+hostname ISP
+ip cef
+
+interface Ethernet0/0
+ description HACIA_CLIENTE_LINUX
+ ip address 10.7.25.6 255.255.255.252
+ no shutdown
+
+interface Ethernet0/1
+ description HACIA_FGT1_PORT3
+ ip address 10.7.25.2 255.255.255.252
+ no shutdown
+
+end
+write memory
+
+Verificacion:
+show ip interface brief
+
+
+============================================================
+3. CONFIGURACION DE LA VPC-LAN
+============================================================
+
+ip 10.7.25.66 255.255.255.224 10.7.25.65
+save
+
+Verificacion:
+show ip
+
+
+============================================================
+4. CONFIGURACION IP BASICA DEL CLIENTE LINUX
+============================================================
+
+sudo ip link set ens4 up
+sudo ip addr flush dev ens4
+sudo ip addr add 10.7.25.5/30 dev ens4
+sudo ip route replace 10.7.25.1/32 via 10.7.25.6 dev ens4
+
+Pruebas:
+ping -c 4 10.7.25.6
+ping -c 4 10.7.25.1
+
+
+============================================================
+5. CONFIGURACION BASE DEL FORTIGATE FGT1
+============================================================
+
+config system hostname
+    set hostname FGT1
+end
+
+config system interface
+    edit "port1"
+        set alias "MGMT_NET"
+        set mode static
+        set ip 192.168.226.210 255.255.255.0
+        set allowaccess ping http https ssh
+        set role wan
+    next
+    edit "port2"
+        set alias "LAN_INTERNA"
+        set mode static
+        set ip 10.7.25.65 255.255.255.224
+        set allowaccess ping http https ssh
+        set role lan
+    next
+    edit "port3"
+        set alias "WAN_HACIA_ISP"
+        set mode static
+        set ip 10.7.25.1 255.255.255.252
+        set allowaccess ping
+        set role wan
+    next
+end
+
+config router static
+    edit 1
+        set dst 0.0.0.0 0.0.0.0
+        set gateway 10.7.25.2
+        set device "port3"
+        set distance 5
+    next
+    edit 2
+        set dst 10.7.25.5 255.255.255.255
+        set gateway 10.7.25.2
+        set device "port3"
+    next
+    edit 99
+        set gateway 192.168.226.2
+        set device "port1"
+        set distance 20
+    next
+end
+
+Pruebas desde FortiGate:
+execute ping 10.7.25.2
+execute ping 10.7.25.5
+execute ping 10.7.25.66
+
+
+============================================================
+6. OBJETOS, USUARIO Y GRUPO EN FORTIGATE
+============================================================
+
+config firewall address
+    edit "LAN_10.7.25.64_27"
+        set subnet 10.7.25.64 255.255.255.224
+    next
+    edit "IPSEC_CLIENT_POOL"
+        set type iprange
+        set start-ip 10.7.25.193
+        set end-ip 10.7.25.206
+    next
+end
+
+config user local
+    edit "vpnuser"
+        set type password
+        set passwd vpnpass
+    next
+end
+
+config user group
+    edit "IPSEC_USERS"
+        set member "vpnuser"
+    next
+end
+
+
+============================================================
+7. VPN IPSEC CLIENT-TO-SITE EN FORTIGATE
+============================================================
+
+IMPORTANTE:
+Se usa el nombre IPSEC_CL porque el FortiGate tiene limite
+de caracteres para nombres de interfaz/tunel.
+
+config vpn ipsec phase1-interface
+    edit "IPSEC_CL"
+        set type dynamic
+        set interface "port3"
+        set ike-version 1
+        set mode aggressive
+        set peertype any
+        set net-device disable
+        set mode-cfg enable
+        set dpd on-idle
+        set dhgrp 5
+        set xauthtype auto
+        set authusrgrp "IPSEC_USERS"
+        set ipv4-start-ip 10.7.25.193
+        set ipv4-end-ip 10.7.25.206
+        set ipv4-netmask 255.255.255.240
+        set psksecret VPN12345
+    next
+end
+
+Verificacion:
+show vpn ipsec phase1-interface
+
+
+============================================================
+8. PHASE 2 EN FORTIGATE
+============================================================
+
+config vpn ipsec phase2-interface
+    edit "IPSEC_CL_P2"
+        set phase1name "IPSEC_CL"
+        set proposal des-sha1
+        set pfs disable
+        set src-subnet 10.7.25.64 255.255.255.224
+        set dst-subnet 10.7.25.192 255.255.255.240
+    next
+end
+
+Verificacion:
+show vpn ipsec phase2-interface
+
+
+============================================================
+9. RUTA HACIA EL CLIENTE VPN
+============================================================
+
+config router static
+    edit 30
+        set dst 10.7.25.192 255.255.255.240
+        set device "IPSEC_CL"
+    next
+end
+
+Verificacion:
+get router info routing-table all
+
+
+============================================================
+10. POLITICAS FIREWALL
+============================================================
+
+config firewall policy
+    edit 30
+        set name "IPSEC_CLIENT_to_LAN"
+        set srcintf "IPSEC_CL"
+        set dstintf "port2"
+        set srcaddr "IPSEC_CLIENT_POOL"
+        set dstaddr "LAN_10.7.25.64_27"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+        set nat disable
+    next
+    edit 40
+        set name "LAN_to_IPSEC_CLIENT"
+        set srcintf "port2"
+        set dstintf "IPSEC_CL"
+        set srcaddr "LAN_10.7.25.64_27"
+        set dstaddr "IPSEC_CLIENT_POOL"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+        set nat disable
+    next
+end
+
+Verificacion:
+show firewall policy
+
+
+============================================================
+11. INSTALAR STRONGSWAN EN LINUX
+============================================================
+
+sudo apt update
+sudo apt install strongswan traceroute -y
+
+
+============================================================
+12. CONFIGURAR /etc/ipsec.conf EN LINUX
+============================================================
+
+Comando:
+sudo nano /etc/ipsec.conf
+
+Contenido:
+
+config setup
+    uniqueids=no
+
+conn FGT-IPSEC-CLIENT
+    keyexchange=ikev1
+    aggressive=yes
+    authby=secret
+
+    left=10.7.25.5
+    leftsourceip=%config
+    leftauth=psk
+    leftauth2=xauth
+    xauth_identity=vpnuser
+
+    right=10.7.25.1
+    rightauth=psk
+    rightsubnet=10.7.25.64/27
+
+    ike=des-sha1-modp1536!
+    esp=des-sha1!
+
+    auto=add
+
+Guardar:
+CTRL + O
+ENTER
+CTRL + X
+
+
+============================================================
+13. CONFIGURAR /etc/ipsec.secrets EN LINUX
+============================================================
+
+Comando:
+sudo nano /etc/ipsec.secrets
+
+Contenido:
+
+: PSK "VPN12345"
+vpnuser : XAUTH "vpnpass"
+
+Guardar:
+CTRL + O
+ENTER
+CTRL + X
+
+
+============================================================
+14. REINICIAR STRONGSWAN Y LEVANTAR LA VPN
+============================================================
+
+sudo ipsec restart
+sudo ipsec up FGT-IPSEC-CLIENT
+
+Resultado esperado:
+IKE_SA established
+CHILD_SA FGT-IPSEC-CLIENT established
+
+
+============================================================
+15. PRUEBAS DESDE LINUX
+============================================================
+
+ip route
+ping -c 4 10.7.25.65
+ping -c 4 10.7.25.66
+traceroute 10.7.25.66
+sudo ipsec statusall
+
+Resultado esperado:
+- Linux debe llegar a la interfaz LAN del FortiGate 10.7.25.65.
+- Linux debe llegar a la VPC-LAN 10.7.25.66.
+- El traceroute debe llegar al destino 10.7.25.66.
+
+
+============================================================
+16. PRUEBAS DESDE VPC-LAN HACIA CLIENTE VPN
+============================================================
+
+ping 10.7.25.193
+trace 10.7.25.193
+
+Resultado esperado:
+- La VPC-LAN debe responder ping hacia la IP VPN del cliente Linux.
+- El trace debe pasar por el FortiGate 10.7.25.65 y llegar al cliente VPN.
+
+
+============================================================
+17. VERIFICACION EN FORTIGATE
+============================================================
+
+get vpn ipsec tunnel summary
+diagnose vpn ike gateway list
+diagnose vpn tunnel list name IPSEC_CL
+
+Resultado esperado:
+xauth-user: vpnuser
+assigned IPv4 address: 10.7.25.193
+IKE SA: established 1/1
+IPsec SA: established 1/1
+proposal: des-sha1
+
+
+============================================================
+FIN DEL SCRIPT
+============================================================
